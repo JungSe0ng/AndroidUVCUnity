@@ -17,31 +17,43 @@ public class SimpleExample : MonoBehaviour
     void Start()
     {
         Debug.Log("Start");
+        StartCoroutine(InitializeWithRetry());
+    }
 
-        // 먼저 Android 런타임 권한 요청
+    IEnumerator InitializeWithRetry()
+    {
+        // 권한 요청
         RequestAndroidPermissions();
+        yield return new WaitForSeconds(2f);
 
-        // UVC 플러그인 초기화
+        // 플러그인 초기화
         InitializePlugin();
+        yield return new WaitForSeconds(1f);
 
-        // 카메라 찾을 때까지 반복
-        StartCoroutine(FindCameraAndStart());
+        // 카메라 찾기 및 시작
+        yield return StartCoroutine(FindCameraAndStart());
     }
 
     void RequestAndroidPermissions()
     {
-        // Horizon OS USB Camera 권한 요청
-        if (!Permission.HasUserAuthorizedPermission("horizonos.permission.USB_CAMERA"))
-        {
-            Permission.RequestUserPermission("horizonos.permission.USB_CAMERA");
-            Debug.Log("[UVC] Requesting Horizon OS USB Camera permission");
-        }
+        // Quest 3 전용 권한들
+        string[] requiredPermissions = {
+            "horizonos.permission.USB_CAMERA",
+            Permission.Camera,
+            "android.permission.CAMERA"
+        };
 
-        // 기본 카메라 권한 요청
-        if (!Permission.HasUserAuthorizedPermission(Permission.Camera))
+        foreach (string permission in requiredPermissions)
         {
-            Permission.RequestUserPermission(Permission.Camera);
-            Debug.Log("[UVC] Requesting Camera permission");
+            if (!Permission.HasUserAuthorizedPermission(permission))
+            {
+                Permission.RequestUserPermission(permission);
+                Debug.Log($"[UVC] {permission} 권한 요청");
+            }
+            else
+            {
+                Debug.Log($"[UVC] {permission} 권한 이미 있음");
+            }
         }
     }
 
@@ -49,7 +61,6 @@ public class SimpleExample : MonoBehaviour
     {
         try
         {
-            // WebCamTexture 체크 제거 (내장 카메라 관련이므로)
             Debug.Log("[UVC] Initializing UVC Plugin...");
 
             plugin = new AndroidJavaObject("edu.uga.engr.vel.unityuvcplugin.UnityUVCPlugin");
@@ -74,7 +85,7 @@ public class SimpleExample : MonoBehaviour
     {
         string[] cameras = null;
         int retryCount = 0;
-        const int maxRetries = 30; // 30초 동안 시도
+        const int maxRetries = 10;
 
         while (retryCount < maxRetries)
         {
@@ -89,7 +100,7 @@ public class SimpleExample : MonoBehaviour
                 }
                 else
                 {
-                    Debug.Log("[UVC] 카메라가 없습니다. 다시 시도합니다...");
+                    Debug.Log($"[UVC] 카메라가 없습니다. 다시 시도합니다... ({retryCount + 1}/{maxRetries})");
                 }
             }
             catch (Exception e)
@@ -103,7 +114,7 @@ public class SimpleExample : MonoBehaviour
 
         if (cameras == null || cameras.Length == 0)
         {
-            Debug.LogError("[UVC] 카메라를 찾을 수 없습니다. USB 연결을 확인하세요.");
+            Debug.LogError("[UVC] 카메라를 찾을 수 없습니다. 중단합니다.");
             yield break;
         }
 
@@ -130,9 +141,9 @@ public class SimpleExample : MonoBehaviour
             }
         }
 
-        // 권한 확인 루프 (더 긴 대기 시간과 재시도 로직)
+        // 권한 확인 루프
         int permissionRetries = 0;
-        const int maxPermissionRetries = 12; // 60초 동안 시도
+        const int maxPermissionRetries = 6;
 
         while (permissionRetries < maxPermissionRetries)
         {
@@ -148,8 +159,8 @@ public class SimpleExample : MonoBehaviour
                 {
                     Debug.Log($"[UVC] {cameraName} 권한 대기 중... ({permissionRetries + 1}/{maxPermissionRetries})");
 
-                    // 매 3번째 시도마다 권한 재요청
-                    if (permissionRetries % 3 == 2)
+                    // 매 2번째 시도마다 권한 재요청
+                    if (permissionRetries % 2 == 1)
                     {
                         plugin.Call("ObtainPermission", cameraName);
                         Debug.Log($"[UVC] {cameraName} 권한 재요청");
@@ -179,7 +190,7 @@ public class SimpleExample : MonoBehaviour
 
         if (!finalPermissionCheck)
         {
-            Debug.LogError($"[UVC] {cameraName} 권한을 얻지 못했습니다. Quest 설정에서 수동으로 권한을 허용하세요.");
+            Debug.LogError($"[UVC] {cameraName} 권한을 얻지 못했습니다. 중단합니다.");
             ShowPermissionInstructions();
             yield break;
         }
@@ -191,7 +202,7 @@ public class SimpleExample : MonoBehaviour
     void ShowPermissionInstructions()
     {
         Debug.Log("=== 권한 설정 방법 ===");
-        Debug.Log("1. Quest 헤드셋에서 Settings → Apps → [앱 이름] 으로 이동");
+        Debug.Log("1. Quest 헤드셋에서 Settings -> Apps -> [앱 이름] 으로 이동");
         Debug.Log("2. Permissions 섹션에서 Camera 권한 활성화");
         Debug.Log("3. 앱을 다시 시작하세요");
         Debug.Log("====================");
@@ -201,41 +212,112 @@ public class SimpleExample : MonoBehaviour
     {
         Debug.Log($"[UVC] {cameraName} 카메라 시작");
 
-        string[] infos = null;
+        // 디바이스 정보 확인
         try
         {
-            // 카메라 열기
+            string deviceInfo = plugin.Call<string>("GetUSBDeviceInfo", cameraName);
+            Debug.Log($"[UVC] 디바이스 정보:\n{deviceInfo}");
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"[UVC] 디바이스 정보 가져오기 실패: {e.Message}");
+        }
+
+        // 권한 재확인
+        bool hasPermission = false;
+        try
+        {
+            hasPermission = plugin.Call<bool>("hasPermission", cameraName);
+            Debug.Log($"[UVC] 권한 상태: {hasPermission}");
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"[UVC] 권한 확인 실패: {e.Message}");
+            yield break;
+        }
+
+        if (!hasPermission)
+        {
+            Debug.LogError("[UVC] 권한이 없습니다!");
+            yield break;
+        }
+
+        // 먼저 기존 연결이 있다면 닫기
+        try
+        {
+            plugin.Call("Close", cameraName);
+            Debug.Log("[UVC] 기존 연결 닫기 시도 완료");
+        }
+        catch (Exception closeEx)
+        {
+            Debug.Log($"[UVC] Close 시도 (무시됨): {closeEx.Message}");
+        }
+
+        yield return new WaitForSeconds(1f);
+
+        string[] infos = null;
+        bool openSuccess = false;
+
+        // 첫 번째 카메라 열기 시도
+        try
+        {
+            Debug.Log($"[UVC] '{cameraName}' 카메라 열기 시도");
             infos = plugin.Call<string[]>("Open", cameraName);
-
-            // null 체크
-            if (infos == null)
-            {
-                Debug.LogError("[UVC] plugin.Call('Open') returned null");
-                yield break;
-            }
-
-            if (infos.Length == 0)
-            {
-                Debug.LogError("[UVC] plugin.Call('Open') returned empty array");
-                yield break;
-            }
-
-            Debug.Log($"[UVC] Open 성공. 사용 가능한 포맷 수: {infos.Length}");
-            for (int i = 0; i < infos.Length; i++)
-            {
-                Debug.Log($"[UVC] Format {i}: {infos[i]}");
-            }
+            openSuccess = (infos != null);
         }
         catch (System.Exception e)
         {
-            Debug.LogError($"[UVC] Camera open failed: {e.Message}");
-            Debug.LogError($"[UVC] Stack trace: {e.StackTrace}");
-            yield break;
+            Debug.LogError($"[UVC] 첫 번째 Camera open failed: {e.Message}");
+            openSuccess = false;
+        }
+
+        // 첫 번째 시도가 실패하면 재시도
+        if (!openSuccess || infos == null)
+        {
+            Debug.LogError("[UVC] Open 메서드가 null을 반환했습니다.");
+            Debug.LogError("[UVC] 이는 네이티브 openCamera 함수가 실패했음을 의미합니다.");
+
+            yield return new WaitForSeconds(3f);
+
+            try
+            {
+                Debug.Log("[UVC] 카메라 열기 재시도...");
+                infos = plugin.Call<string[]>("Open", cameraName);
+                openSuccess = (infos != null);
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[UVC] 재시도 Camera open failed: {e.Message}");
+                openSuccess = false;
+            }
+
+            if (!openSuccess || infos == null)
+            {
+                Debug.LogError("[UVC] 재시도도 실패했습니다. 카메라를 사용할 수 없습니다.");
+                yield break;
+            }
+        }
+
+        Debug.Log($"[UVC] Open 성공! 사용 가능한 포맷 수: {infos.Length}");
+        for (int i = 0; i < infos.Length; i++)
+        {
+            Debug.Log($"[UVC] Format {i}: {infos[i]}");
+        }
+
+        // 카메라의 실제 디스크립터 정보 확인
+        try
+        {
+            string descriptorInfo = plugin.Call<string>("getDescriptor", 0);
+            Debug.Log($"[UVC] 카메라 디스크립터 상세 정보:\n{descriptorInfo}");
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"[UVC] 디스크립터 정보 가져오기 실패: {e.Message}");
         }
 
         // MJPEG 포맷 찾기 (타입 6) - 적절한 해상도 우선 선택
         int goodIndex = -1;
-        int[] preferredResolutions = { 640, 848, 960, 1280, 1024 }; // 선호하는 가로 해상도 순서
+        int[] preferredResolutions = { 640, 848, 960, 1280, 1024 };
 
         // 먼저 선호하는 해상도 중에서 찾기
         foreach (int prefWidth in preferredResolutions)
@@ -324,59 +406,68 @@ public class SimpleExample : MonoBehaviour
         Debug.Log($"[UVC] 카메라 설정: {width}x{height} @ {fps}fps");
 
         int res = -1;
-        try
-        {
-            // 카메라 스트리밍 시작 - 올바른 메서드 시그니처 사용
-            // 원본 코드에서는 6개 파라미터였지만, 실제로는 5개 파라미터인 것 같음
-            Debug.Log($"[UVC] Start 메서드 호출: {cameraName}, {width}, {height}, {fps}, {bandwidth}");
+        bool startSuccess = false;
 
-            // 다양한 시그니처 시도
+        // 로그에서 확인된 실제 포맷 인덱스를 사용 (mode가 포맷 인덱스)
+        // Format 8: 6,640,480,30 - 640x480 MJPEG
+        // Format 5: 6,848,480,30 - 848x480 MJPEG  
+        // Format 7: 6,1280,720,30 - 1280x720 MJPEG
+        // Format 9: 6,1920,1080,30 - 1920x1080 MJPEG
+        // Format 4: 6,640,360,30 - 640x360 MJPEG
+        // Format 3: 6,424,240,30 - 424x240 MJPEG
+        // Format 2: 6,320,240,30 - 320x240 MJPEG (이전 성공)
+
+        int[][] resolutionSettings = {
+            new int[] {1920, 1080, 30, 9, 5},   // Format 9: 1920x1080, bw=0.05
+            new int[] {1280, 720, 30, 7, 8},    // Format 7: 1280x720, bw=0.08
+            new int[] {848, 480, 30, 5, 12},    // Format 5: 848x480, bw=0.12
+            new int[] {640, 480, 30, 8, 15},    // Format 8: 640x480, bw=0.15
+            new int[] {640, 360, 30, 4, 18},    // Format 4: 640x360, bw=0.18
+            new int[] {424, 240, 30, 3, 20},    // Format 3: 424x240, bw=0.2
+            new int[] {320, 240, 30, 2, 10},    // Format 2: 320x240, bw=0.1 (이전 성공)
+        };
+
+        for (int i = 0; i < resolutionSettings.Length; i++)
+        {
+            int testWidth = resolutionSettings[i][0];
+            int testHeight = resolutionSettings[i][1];
+            int testFps = resolutionSettings[i][2];
+            int testMode = resolutionSettings[i][3]; // 이제 실제 포맷 인덱스
+            float testBandwidth = resolutionSettings[i][4] / 100.0f;
+
             try
             {
-                // 시도 1: 5개 파라미터 (String, int, int, int, float)
-                res = plugin.Call<int>("Start", cameraName, width, height, fps, bandwidth);
-                Debug.Log($"[UVC] Start method (5 params) successful: {res}");
+                Debug.Log($"[UVC] 해상도 시도 {i + 1}: {testWidth}x{testHeight}@{testFps}fps, Format {testMode}, bw={testBandwidth}");
+                res = plugin.Call<int>("Start", cameraName, testWidth, testHeight, testFps, testMode, testBandwidth, true, false);
+                Debug.Log($"[UVC] 결과: {res}");
+
+                if (res == 0)
+                {
+                    Debug.Log($"[UVC] 성공! 해상도: {testWidth}x{testHeight}, Format {testMode}");
+                    width = testWidth;
+                    height = testHeight;
+                    fps = testFps;
+                    startSuccess = true;
+                    break;
+                }
+                else
+                {
+                    Debug.LogWarning($"[UVC] 실패: {testWidth}x{testHeight} Format {testMode} (에러: {res})");
+                }
             }
-            catch (System.Exception e1)
+            catch (Exception e)
             {
-                Debug.LogWarning($"[UVC] Start method (5 params) failed: {e1.Message}");
-
-                try
-                {
-                    // 시도 2: 4개 파라미터 (String, int, int, int)
-                    res = plugin.Call<int>("Start", cameraName, width, height, fps);
-                    Debug.Log($"[UVC] Start method (4 params) successful: {res}");
-                }
-                catch (System.Exception e2)
-                {
-                    Debug.LogWarning($"[UVC] Start method (4 params) failed: {e2.Message}");
-
-                    try
-                    {
-                        // 시도 3: startStreaming 메서드 사용
-                        res = plugin.Call<int>("startStreaming", cameraName, width, height, fps);
-                        Debug.Log($"[UVC] startStreaming method successful: {res}");
-                    }
-                    catch (System.Exception e3)
-                    {
-                        Debug.LogError($"[UVC] All Start method attempts failed");
-                        Debug.LogError($"[UVC] Method 1 (5 params): {e1.Message}");
-                        Debug.LogError($"[UVC] Method 2 (4 params): {e2.Message}");
-                        Debug.LogError($"[UVC] Method 3 (startStreaming): {e3.Message}");
-                        yield break;
-                    }
-                }
+                Debug.LogError($"[UVC] 해상도 {testWidth}x{testHeight} Format {testMode} 시도 에러: {e.Message}");
             }
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogError($"[UVC] Camera start failed: {e.Message}");
-            yield break;
+
+            yield return new WaitForSeconds(0.3f);
         }
 
-        if (res != 0)
+        if (!startSuccess)
         {
-            Debug.LogError($"[UVC] 카메라 시작 실패. 오류 코드: {res}");
+            Debug.LogError($"[UVC] 모든 시도 실패. 마지막 오류 코드: {res}");
+            Debug.LogError("[UVC] 카메라 포맷이 지원되지 않거나 하드웨어 문제일 수 있습니다.");
+            Debug.LogError("[UVC] 시도를 중단합니다.");
             yield break;
         }
 
@@ -386,7 +477,9 @@ public class SimpleExample : MonoBehaviour
         Texture2D cameraTexture = null;
         try
         {
-            cameraTexture = new Texture2D(width, height, TextureFormat.RGB24, false, true);
+            // MJPEG는 RGB24로 디코딩됨
+            cameraTexture = new Texture2D(width, height, TextureFormat.RGB24, false);
+            Debug.Log($"[UVC] 텍스처 생성: {width}x{height}, RGB24");
 
             Renderer renderer = GetComponent<Renderer>();
             if (renderer == null)
@@ -505,6 +598,17 @@ public class SimpleExample : MonoBehaviour
         {
             plugin.Call("ObtainPermission", currentCameraName);
             Debug.Log("[UVC] Manual permission request sent");
+        }
+    }
+
+    // 디버그용 - Inspector에서 수동으로 카메라 재시작
+    [ContextMenu("Restart Camera")]
+    void RestartCamera()
+    {
+        if (!string.IsNullOrEmpty(currentCameraName))
+        {
+            StopAllCoroutines();
+            StartCoroutine(RunCamera(currentCameraName));
         }
     }
 }

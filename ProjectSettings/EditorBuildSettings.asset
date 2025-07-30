@@ -9,5 +9,6 @@ EditorBuildSettings:
     path: Assets/Samples/XR Interaction Toolkit/2.5.4/Starter Assets/DemoScene.unity
     guid: 319dafa5c80f29f428dc1e0d03f04177
   m_configObjects:
+    Unity.XR.Oculus.Settings: {fileID: 11400000, guid: fa60004582368f6499a5adf3a375ea4e, type: 2}
     com.unity.xr.management.loader_settings: {fileID: 11400000, guid: 2df6a30d2e490b0429c2233fc8a66c9c, type: 2}
     com.unity.xr.openxr.settings4: {fileID: 11400000, guid: 72de9a5c3c835604284ae64576756768, type: 2}
