@@ -4,15 +4,13 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Android;
 using UnityEngine.UI;
-
-[RequireComponent(typeof(MeshRenderer))]
 public class MultiCameraExample : MonoBehaviour
 {
     [System.Serializable]
     public class CameraRenderTarget
     {
         public string cameraName = "";
-        public Renderer targetRenderer;
+        public RawImage targetRawImage;
         public Texture2D cameraTexture;
         public bool isActive = false;
         public int width = 640;
@@ -51,12 +49,6 @@ public class MultiCameraExample : MonoBehaviour
             {
                 cameraTargets[i] = new CameraRenderTarget();
             }
-        }
-
-        // 첫 번째 카메라는 자기 자신의 렌더러 사용
-        if (cameraTargets[0].targetRenderer == null)
-        {
-            cameraTargets[0].targetRenderer = GetComponent<Renderer>();
         }
 
         // UI 버튼 이벤트 연결
@@ -163,12 +155,12 @@ public class MultiCameraExample : MonoBehaviour
                         target.renderCoroutine = null;
                     }
 
-                    // 텍스처 정리
+                    // 텍스처 정리 - RawImage 방식
                     if (target.cameraTexture != null)
                     {
-                        if (target.targetRenderer != null && target.targetRenderer.material != null)
+                        if (target.targetRawImage != null)
                         {
-                            target.targetRenderer.material.mainTexture = null;
+                            target.targetRawImage.texture = null;
                         }
                         Destroy(target.cameraTexture);
                         target.cameraTexture = null;
@@ -680,14 +672,14 @@ public class MultiCameraExample : MonoBehaviour
             target.fps = fps;
             target.isActive = true;
 
-            if (target.targetRenderer != null && target.targetRenderer.material != null)
+            if (target.targetRawImage != null)
             {
-                target.targetRenderer.material.mainTexture = target.cameraTexture;
+                target.targetRawImage.texture = target.cameraTexture;
                 Debug.Log($"[MultiCamera] 카메라 {cameraIndex} 텍스처 설정 완료: {width}x{height}");
             }
             else
             {
-                Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} Renderer 또는 Material이 없습니다!");
+                Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} RawImage가 할당되지 않았습니다!");
                 onComplete?.Invoke(false);
                 yield break;
             }
@@ -795,31 +787,29 @@ public class MultiCameraExample : MonoBehaviour
                     target.renderCoroutine = null;
                 }
 
+                // 텍스처 정리
+                if (target.cameraTexture != null)
+                {
+                    if (target.targetRawImage != null)
+                    {
+                        target.targetRawImage.texture = null;
+                    }
+                    Destroy(target.cameraTexture);
+                    target.cameraTexture = null;
+                }
+
                 try
                 {
                     if (plugin != null && !string.IsNullOrEmpty(target.cameraName))
                     {
                         // Java 플러그인의 실제 메서드명에 맞춰서 호출
-                        // Stop 메서드는 없고, Close는 closeCamera로 구현됨
-                        plugin.Call("Close", target.cameraName); // 이 부분은 에러가 날 수 있지만 시도
+                        plugin.Call("Close", target.cameraName);
                         Debug.Log($"[MultiCamera] 카메라 {i} ({target.cameraName}) 중지 시도 완료");
                     }
                 }
                 catch (Exception e)
                 {
-                    // 메서드가 없어서 에러가 나는 것은 정상 - 무시
                     Debug.Log($"[MultiCamera] 카메라 {i} 정리 시도 (메서드 없음): {e.Message}");
-                }
-
-                // 텍스처 정리
-                if (target.cameraTexture != null)
-                {
-                    if (target.targetRenderer != null && target.targetRenderer.material != null)
-                    {
-                        target.targetRenderer.material.mainTexture = null;
-                    }
-                    Destroy(target.cameraTexture);
-                    target.cameraTexture = null;
                 }
 
                 // 카메라 이름도 초기화 (중요!)
@@ -838,7 +828,6 @@ public class MultiCameraExample : MonoBehaviour
         StopAllCameras();
     }
 
-    // 디버그용 메서드들
     [ContextMenu("Manual Permission Request All")]
     void ManualPermissionRequestAll()
     {
