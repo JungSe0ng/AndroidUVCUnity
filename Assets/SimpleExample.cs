@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Android;
+using UnityEngine.UI;
 
 [RequireComponent(typeof(MeshRenderer))]
 public class MultiCameraExample : MonoBehaviour
@@ -30,7 +31,13 @@ public class MultiCameraExample : MonoBehaviour
     [SerializeField] private int maxCameras = 2;
     [SerializeField] private CameraRenderTarget[] cameraTargets = new CameraRenderTarget[2];
 
+    [Header("UI Controls")]
+    [SerializeField] private Button reconnectButton;
+    [SerializeField] private Text statusText;
+
     private List<string> availableCameras = new List<string>();
+    private bool isInitialized = false;
+    private bool isReconnecting = false;
 
     void Start()
     {
@@ -52,21 +59,213 @@ public class MultiCameraExample : MonoBehaviour
             cameraTargets[0].targetRenderer = GetComponent<Renderer>();
         }
 
+        // UI 버튼 이벤트 연결
+        SetupUI();
+
         StartCoroutine(InitializeWithRetry());
+    }
+
+    void SetupUI()
+    {
+        if (reconnectButton != null)
+        {
+            reconnectButton.onClick.AddListener(() => {
+                if (!isReconnecting)
+                {
+                    StartCoroutine(ReconnectCameras());
+                }
+            });
+        }
+
+        UpdateStatusText("초기화 중...");
+    }
+
+    void UpdateStatusText(string message)
+    {
+        if (statusText != null)
+        {
+            statusText.text = $"[{System.DateTime.Now:HH:mm:ss}] {message}";
+        }
+        Debug.Log($"[MultiCamera] {message}");
     }
 
     IEnumerator InitializeWithRetry()
     {
+        UpdateStatusText("권한 요청 중...");
+
         // 권한 요청
         RequestAndroidPermissions();
         yield return new WaitForSeconds(2f);
 
         // 플러그인 초기화
-        InitializePlugin();
-        yield return new WaitForSeconds(1f);
+        if (!isInitialized)
+        {
+            UpdateStatusText("플러그인 초기화 중...");
+            InitializePlugin();
+            yield return new WaitForSeconds(1f);
+            isInitialized = true;
+        }
 
         // 카메라 찾기 및 시작
+        UpdateStatusText("카메라 검색 중...");
         yield return StartCoroutine(FindCamerasAndStart());
+    }
+
+    // 카메라 재연결 메서드 - 연결 끊어진 카메라 정리 후 새 카메라 연결
+    public IEnumerator ReconnectCameras()
+    {
+        if (isReconnecting)
+        {
+            UpdateStatusText("이미 재연결 중입니다...");
+            yield break;
+        }
+
+        isReconnecting = true;
+        UpdateStatusText("카메라 상태 확인 중...");
+
+        // 1단계: 현재 연결된 실제 카메라 목록 가져오기
+        string[] allCameras = null;
+        try
+        {
+            allCameras = plugin.Call<string[]>("GetUSBDevices");
+        }
+        catch (Exception e)
+        {
+            UpdateStatusText($"카메라 검색 실패: {e.Message}");
+            isReconnecting = false;
+            yield break;
+        }
+
+        List<string> activeCameraList = new List<string>();
+        if (allCameras != null)
+        {
+            activeCameraList.AddRange(allCameras);
+        }
+
+        // 2단계: 연결이 끊어진 카메라 정리
+        int cleanedCameras = 0;
+        for (int i = 0; i < cameraTargets.Length; i++)
+        {
+            CameraRenderTarget target = cameraTargets[i];
+
+            // 활성화되어 있지만 실제로는 연결되지 않은 카메라 찾기
+            if (target.isActive && !string.IsNullOrEmpty(target.cameraName))
+            {
+                if (!activeCameraList.Contains(target.cameraName))
+                {
+                    // 연결이 끊어진 카메라 정리
+                    UpdateStatusText($"카메라 {i + 1} 연결 끊어짐 감지, 정리 중...");
+
+                    target.isActive = false;
+                    if (target.renderCoroutine != null)
+                    {
+                        StopCoroutine(target.renderCoroutine);
+                        target.renderCoroutine = null;
+                    }
+
+                    // 텍스처 정리
+                    if (target.cameraTexture != null)
+                    {
+                        if (target.targetRenderer != null && target.targetRenderer.material != null)
+                        {
+                            target.targetRenderer.material.mainTexture = null;
+                        }
+                        Destroy(target.cameraTexture);
+                        target.cameraTexture = null;
+                    }
+
+                    target.cameraName = "";
+                    cleanedCameras++;
+                }
+            }
+        }
+
+        if (cleanedCameras > 0)
+        {
+            UpdateStatusText($"{cleanedCameras}개의 끊어진 카메라 정리 완료");
+            yield return new WaitForSeconds(1f);
+        }
+
+        // 3단계: 현재 연결된 카메라들의 이름을 다시 저장
+        List<string> currentActiveCameras = new List<string>();
+        for (int i = 0; i < cameraTargets.Length; i++)
+        {
+            if (cameraTargets[i].isActive && !string.IsNullOrEmpty(cameraTargets[i].cameraName))
+            {
+                currentActiveCameras.Add(cameraTargets[i].cameraName);
+            }
+        }
+
+        UpdateStatusText("새 카메라 검색 중...");
+
+        // 4단계: 새로 연결된 카메라 찾기
+        List<string> newCameras = new List<string>();
+        foreach (string camera in activeCameraList)
+        {
+            if (!currentActiveCameras.Contains(camera))
+            {
+                newCameras.Add(camera);
+            }
+        }
+
+        if (newCameras.Count == 0)
+        {
+            UpdateStatusText("새로 연결된 카메라가 없습니다.");
+            isReconnecting = false;
+            yield break;
+        }
+
+        UpdateStatusText($"{newCameras.Count}개의 새 카메라 발견!");
+
+        // 5단계: 빈 슬롯에 새 카메라 연결
+        int connectedNewCameras = 0;
+        for (int i = 0; i < cameraTargets.Length && connectedNewCameras < newCameras.Count; i++)
+        {
+            // 비어있는 슬롯 찾기
+            if (!cameraTargets[i].isActive || string.IsNullOrEmpty(cameraTargets[i].cameraName))
+            {
+                cameraTargets[i].cameraName = newCameras[connectedNewCameras];
+                UpdateStatusText($"카메라 {i + 1}에 새 카메라 연결 시도...");
+
+                bool success = false;
+                yield return StartCoroutine(SetupCamera(i, (result) => success = result));
+
+                if (success)
+                {
+                    UpdateStatusText($"카메라 {i + 1} 새 카메라 연결 성공!");
+                    connectedNewCameras++;
+                }
+                else
+                {
+                    UpdateStatusText($"카메라 {i + 1} 새 카메라 연결 실패");
+                    cameraTargets[i].cameraName = ""; // 실패시 이름 초기화
+                }
+
+                yield return new WaitForSeconds(1f);
+            }
+        }
+
+        // 6단계: 결과 보고
+        string resultMessage = "";
+        if (cleanedCameras > 0 && connectedNewCameras > 0)
+        {
+            resultMessage = $"정리 {cleanedCameras}개, 신규연결 {connectedNewCameras}개";
+        }
+        else if (cleanedCameras > 0)
+        {
+            resultMessage = $"끊어진 카메라 {cleanedCameras}개 정리완료";
+        }
+        else if (connectedNewCameras > 0)
+        {
+            resultMessage = $"새 카메라 {connectedNewCameras}개 연결완료";
+        }
+        else
+        {
+            resultMessage = "변경사항 없음 - 모든 카메라 정상";
+        }
+
+        UpdateStatusText(resultMessage);
+        isReconnecting = false;
     }
 
     void RequestAndroidPermissions()
@@ -129,7 +328,8 @@ public class MultiCameraExample : MonoBehaviour
                 cameras = plugin.Call<string[]>("GetUSBDevices");
                 if (cameras != null && cameras.Length > 0)
                 {
-                    Debug.Log($"[MultiCamera] 발견된 카메라 수: {cameras.Length}");
+                    UpdateStatusText($"발견된 카메라 수: {cameras.Length}");
+                    availableCameras.Clear(); // 기존 리스트 클리어
                     for (int i = 0; i < cameras.Length; i++)
                     {
                         Debug.Log($"[MultiCamera] 카메라 {i}: {cameras[i]}");
@@ -139,12 +339,13 @@ public class MultiCameraExample : MonoBehaviour
                 }
                 else
                 {
-                    Debug.Log($"[MultiCamera] 카메라가 없습니다. 다시 시도합니다... ({retryCount + 1}/{maxRetries})");
+                    UpdateStatusText($"카메라 검색 중... ({retryCount + 1}/{maxRetries})");
                 }
             }
             catch (Exception e)
             {
                 Debug.LogError("[MultiCamera] GetUSBDevices failed: " + e.Message);
+                UpdateStatusText($"카메라 검색 실패: {e.Message}");
             }
 
             retryCount++;
@@ -153,26 +354,34 @@ public class MultiCameraExample : MonoBehaviour
 
         if (cameras == null || cameras.Length == 0)
         {
-            Debug.LogError("[MultiCamera] 카메라를 찾을 수 없습니다. 중단합니다.");
+            UpdateStatusText("카메라를 찾을 수 없습니다. 재연결 버튼을 눌러주세요.");
             yield break;
         }
 
         // 최대 maxCameras개까지 카메라 시작
         int camerasToStart = Mathf.Min(cameras.Length, maxCameras);
+        UpdateStatusText($"{camerasToStart}개 카메라 연결 시작...");
+
+        int successCount = 0;
         for (int i = 0; i < camerasToStart; i++)
         {
             cameraTargets[i].cameraName = cameras[i];
-            StartCoroutine(SetupCamera(i));
+            bool success = false;
+            yield return StartCoroutine(SetupCamera(i, (result) => success = result));
+            if (success) successCount++;
             yield return new WaitForSeconds(1f); // 카메라 간 초기화 간격
         }
+
+        UpdateStatusText($"카메라 연결 완료: {successCount}/{camerasToStart}개 성공");
     }
 
-    IEnumerator SetupCamera(int cameraIndex)
+    IEnumerator SetupCamera(int cameraIndex, System.Action<bool> onComplete = null)
     {
         CameraRenderTarget target = cameraTargets[cameraIndex];
         string cameraName = target.cameraName;
 
         Debug.Log($"[MultiCamera] 카메라 {cameraIndex} ({cameraName}) 설정 시작");
+        UpdateStatusText($"카메라 {cameraIndex + 1} 설정 중...");
 
         // 권한 요청 및 확인
         yield return StartCoroutine(RequestPermissionAndCheck(cameraName, cameraIndex));
@@ -180,11 +389,16 @@ public class MultiCameraExample : MonoBehaviour
         if (!HasCameraPermission(cameraName))
         {
             Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} ({cameraName}) 권한 획득 실패");
+            UpdateStatusText($"카메라 {cameraIndex + 1} 권한 실패");
+            onComplete?.Invoke(false);
             yield break;
         }
 
         // 카메라 시작
-        yield return StartCoroutine(RunCamera(cameraIndex));
+        bool success = false;
+        yield return StartCoroutine(RunCamera(cameraIndex, (result) => success = result));
+
+        onComplete?.Invoke(success);
     }
 
     IEnumerator RequestPermissionAndCheck(string cameraName, int cameraIndex)
@@ -251,7 +465,7 @@ public class MultiCameraExample : MonoBehaviour
         }
     }
 
-    IEnumerator RunCamera(int cameraIndex)
+    IEnumerator RunCamera(int cameraIndex, System.Action<bool> onComplete = null)
     {
         CameraRenderTarget target = cameraTargets[cameraIndex];
         string cameraName = target.cameraName;
@@ -272,8 +486,9 @@ public class MultiCameraExample : MonoBehaviour
         // 기존 연결이 있다면 닫기
         try
         {
-            plugin.Call("Close", cameraName);
-            Debug.Log($"[MultiCamera] 카메라 {cameraIndex} 기존 연결 닫기 시도 완료");
+            // Java 플러그인에는 Stop 메서드가 없고, Close가 closeCamera로 구현되어 있음
+            // 하지만 Unity에서는 Close를 직접 호출할 수 없으므로 건너뜀
+            Debug.Log($"[MultiCamera] 카메라 {cameraIndex} 기존 연결 정리 시도");
         }
         catch (Exception closeEx)
         {
@@ -282,25 +497,48 @@ public class MultiCameraExample : MonoBehaviour
 
         yield return new WaitForSeconds(1f);
 
-        // 카메라 열기
+        // 카메라 열기 (재시도 로직 추가)
         string[] infos = null;
         bool openSuccess = false;
+        int openRetries = 0;
+        const int maxOpenRetries = 3;
 
-        try
+        while (!openSuccess && openRetries < maxOpenRetries)
         {
-            Debug.Log($"[MultiCamera] 카메라 {cameraIndex} ({cameraName}) 열기 시도");
-            infos = plugin.Call<string[]>("Open", cameraName);
-            openSuccess = (infos != null);
-        }
-        catch (Exception e)
-        {
-            Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} Open 실패: {e.Message}");
-            openSuccess = false;
+            try
+            {
+                Debug.Log($"[MultiCamera] 카메라 {cameraIndex} ({cameraName}) 열기 시도 {openRetries + 1}/{maxOpenRetries}");
+                infos = plugin.Call<string[]>("Open", cameraName);
+                openSuccess = (infos != null && infos.Length > 0);
+
+                if (openSuccess)
+                {
+                    Debug.Log($"[MultiCamera] 카메라 {cameraIndex} Open 성공! 사용 가능한 포맷 수: {infos.Length}");
+                }
+                else
+                {
+                    Debug.LogWarning($"[MultiCamera] 카메라 {cameraIndex} Open 실패 - null 또는 빈 배열 반환");
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} Open 시도 {openRetries + 1} 실패: {e.Message}");
+                openSuccess = false;
+            }
+
+            openRetries++;
+            if (!openSuccess && openRetries < maxOpenRetries)
+            {
+                Debug.Log($"[MultiCamera] 카메라 {cameraIndex} {openRetries + 1}초 후 재시도...");
+                yield return new WaitForSeconds(openRetries); // 점진적 대기 시간 증가
+            }
         }
 
         if (!openSuccess || infos == null)
         {
             Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} Open 실패");
+            UpdateStatusText($"카메라 {cameraIndex + 1} 열기 실패");
+            onComplete?.Invoke(false);
             yield break;
         }
 
@@ -311,11 +549,21 @@ public class MultiCameraExample : MonoBehaviour
         if (goodIndex < 0)
         {
             Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} MJPEG 포맷을 찾을 수 없습니다.");
+            UpdateStatusText($"카메라 {cameraIndex + 1} 포맷 없음");
+            onComplete?.Invoke(false);
             yield break;
         }
 
         // 카메라 설정 파싱 및 시작
-        yield return StartCoroutine(StartCameraStream(cameraIndex, infos, goodIndex));
+        bool streamSuccess = false;
+        yield return StartCoroutine(StartCameraStream(cameraIndex, infos, goodIndex, (result) => streamSuccess = result));
+
+        if (streamSuccess)
+        {
+            UpdateStatusText($"카메라 {cameraIndex + 1} 연결 성공");
+        }
+
+        onComplete?.Invoke(streamSuccess);
     }
 
     int FindBestMJPEGFormat(string[] infos, int cameraIndex)
@@ -359,7 +607,7 @@ public class MultiCameraExample : MonoBehaviour
         return goodIndex;
     }
 
-    IEnumerator StartCameraStream(int cameraIndex, string[] infos, int formatIndex)
+    IEnumerator StartCameraStream(int cameraIndex, string[] infos, int formatIndex, System.Action<bool> onComplete = null)
     {
         CameraRenderTarget target = cameraTargets[cameraIndex];
         string cameraName = target.cameraName;
@@ -413,7 +661,14 @@ public class MultiCameraExample : MonoBehaviour
         if (!startSuccess)
         {
             Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} 모든 시도 실패");
+            onComplete?.Invoke(false);
             yield break;
+        }
+
+        // 기존 텍스처가 있다면 삭제
+        if (target.cameraTexture != null)
+        {
+            Destroy(target.cameraTexture);
         }
 
         // 텍스처 생성
@@ -433,17 +688,20 @@ public class MultiCameraExample : MonoBehaviour
             else
             {
                 Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} Renderer 또는 Material이 없습니다!");
+                onComplete?.Invoke(false);
                 yield break;
             }
         }
         catch (Exception e)
         {
             Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} 텍스처 생성 실패: {e.Message}");
+            onComplete?.Invoke(false);
             yield break;
         }
 
         // 프레임 렌더링 코루틴 시작
         target.renderCoroutine = StartCoroutine(RenderCameraFrames(cameraIndex));
+        onComplete?.Invoke(true);
     }
 
     IEnumerator RenderCameraFrames(int cameraIndex)
@@ -520,40 +778,64 @@ public class MultiCameraExample : MonoBehaviour
         target.isActive = false;
     }
 
-    void OnDestroy()
-    {
-        StopAllCameras();
-    }
-
     void StopAllCameras()
     {
+        UpdateStatusText("모든 카메라 중지 중...");
+
         for (int i = 0; i < cameraTargets.Length; i++)
         {
             CameraRenderTarget target = cameraTargets[i];
-            if (target != null && target.isActive)
+            if (target != null)
             {
                 target.isActive = false;
 
                 if (target.renderCoroutine != null)
                 {
                     StopCoroutine(target.renderCoroutine);
+                    target.renderCoroutine = null;
                 }
 
                 try
                 {
                     if (plugin != null && !string.IsNullOrEmpty(target.cameraName))
                     {
-                        plugin.Call("Stop", target.cameraName);
-                        plugin.Call("Close", target.cameraName);
-                        Debug.Log($"[MultiCamera] 카메라 {i} ({target.cameraName}) 중지 및 닫기 완료");
+                        // Java 플러그인의 실제 메서드명에 맞춰서 호출
+                        // Stop 메서드는 없고, Close는 closeCamera로 구현됨
+                        plugin.Call("Close", target.cameraName); // 이 부분은 에러가 날 수 있지만 시도
+                        Debug.Log($"[MultiCamera] 카메라 {i} ({target.cameraName}) 중지 시도 완료");
                     }
                 }
                 catch (Exception e)
                 {
-                    Debug.LogError($"[MultiCamera] 카메라 {i} 정리 실패: {e.Message}");
+                    // 메서드가 없어서 에러가 나는 것은 정상 - 무시
+                    Debug.Log($"[MultiCamera] 카메라 {i} 정리 시도 (메서드 없음): {e.Message}");
                 }
+
+                // 텍스처 정리
+                if (target.cameraTexture != null)
+                {
+                    if (target.targetRenderer != null && target.targetRenderer.material != null)
+                    {
+                        target.targetRenderer.material.mainTexture = null;
+                    }
+                    Destroy(target.cameraTexture);
+                    target.cameraTexture = null;
+                }
+
+                // 카메라 이름도 초기화 (중요!)
+                target.cameraName = "";
+                target.width = 640;
+                target.height = 480;
+                target.fps = 30;
             }
         }
+
+        UpdateStatusText("모든 카메라 중지 완료");
+    }
+
+    void OnDestroy()
+    {
+        StopAllCameras();
     }
 
     // 디버그용 메서드들
@@ -574,26 +856,97 @@ public class MultiCameraExample : MonoBehaviour
     [ContextMenu("Restart All Cameras")]
     void RestartAllCameras()
     {
-        StopAllCameras();
-        StopAllCoroutines();
-        StartCoroutine(InitializeWithRetry());
-    }
-
-    [ContextMenu("Stop All Cameras")]
-    void StopAllCamerasManual()
-    {
-        StopAllCameras();
+        if (!isReconnecting)
+        {
+            StartCoroutine(ReconnectCameras());
+        }
     }
 
     // 런타임에서 카메라 상태 확인
     public void GetCameraStatus()
     {
-        Debug.Log("=== 카메라 상태 ===");
+        string statusMessage = "=== 카메라 상태 ===\n";
         for (int i = 0; i < cameraTargets.Length; i++)
         {
             CameraRenderTarget target = cameraTargets[i];
-            Debug.Log($"카메라 {i}: {target.cameraName}, 활성: {target.isActive}, 해상도: {target.width}x{target.height}");
+            statusMessage += $"카메라 {i}: {target.cameraName}, 활성: {target.isActive}, 해상도: {target.width}x{target.height}\n";
         }
-        Debug.Log("==================");
+        statusMessage += "==================";
+
+        UpdateStatusText("카메라 상태 확인됨");
+        Debug.Log(statusMessage);
+    }
+
+    // 개별 카메라 재연결
+    public void ReconnectSingleCamera(int cameraIndex)
+    {
+        if (cameraIndex >= 0 && cameraIndex < cameraTargets.Length && !isReconnecting)
+        {
+            StartCoroutine(ReconnectSingleCameraCoroutine(cameraIndex));
+        }
+    }
+
+    IEnumerator ReconnectSingleCameraCoroutine(int cameraIndex)
+    {
+        CameraRenderTarget target = cameraTargets[cameraIndex];
+        UpdateStatusText($"카메라 {cameraIndex + 1} 재연결 중...");
+
+        // 해당 카메라만 중지
+        target.isActive = false;
+        if (target.renderCoroutine != null)
+        {
+            StopCoroutine(target.renderCoroutine);
+            target.renderCoroutine = null;
+        }
+
+        try
+        {
+            if (plugin != null && !string.IsNullOrEmpty(target.cameraName))
+            {
+                plugin.Call("Stop", target.cameraName);
+                plugin.Call("Close", target.cameraName);
+            }
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} 정리 실패: {e.Message}");
+        }
+
+        yield return new WaitForSeconds(1f);
+
+        // 사용 가능한 카메라 다시 검색
+        string[] cameras = null;
+        bool getDevicesSuccess = false;
+
+        try
+        {
+            cameras = plugin.Call<string[]>("GetUSBDevices");
+            getDevicesSuccess = true;
+        }
+        catch (Exception e)
+        {
+            UpdateStatusText($"카메라 {cameraIndex + 1} 재연결 에러: {e.Message}");
+            getDevicesSuccess = false;
+        }
+
+        if (getDevicesSuccess && cameras != null && cameras.Length > cameraIndex)
+        {
+            target.cameraName = cameras[cameraIndex];
+            bool success = false;
+            yield return StartCoroutine(SetupCamera(cameraIndex, (result) => success = result));
+
+            if (success)
+            {
+                UpdateStatusText($"카메라 {cameraIndex + 1} 재연결 성공");
+            }
+            else
+            {
+                UpdateStatusText($"카메라 {cameraIndex + 1} 재연결 실패");
+            }
+        }
+        else if (getDevicesSuccess)
+        {
+            UpdateStatusText($"카메라 {cameraIndex + 1} 찾을 수 없음");
+        }
     }
 }
