@@ -5,18 +5,53 @@ using UnityEngine;
 using UnityEngine.Android;
 
 [RequireComponent(typeof(MeshRenderer))]
-public class SimpleExample : MonoBehaviour
+public class MultiCameraExample : MonoBehaviour
 {
+    [System.Serializable]
+    public class CameraRenderTarget
+    {
+        public string cameraName = "";
+        public Renderer targetRenderer;
+        public Texture2D cameraTexture;
+        public bool isActive = false;
+        public int width = 640;
+        public int height = 480;
+        public int fps = 30;
+        public Coroutine renderCoroutine;
+    }
+
     AndroidJavaObject plugin;
     AndroidJavaObject activity;
     AndroidJavaClass unityPlayer;
 
     private bool permissionRequested = false;
-    private string currentCameraName = "";
+
+    [Header("Camera Settings")]
+    [SerializeField] private int maxCameras = 2;
+    [SerializeField] private CameraRenderTarget[] cameraTargets = new CameraRenderTarget[2];
+
+    private List<string> availableCameras = new List<string>();
 
     void Start()
     {
-        Debug.Log("Start");
+        Debug.Log("[MultiCamera] Start");
+
+        // CameraRenderTarget 배열 초기화
+        if (cameraTargets == null || cameraTargets.Length != maxCameras)
+        {
+            cameraTargets = new CameraRenderTarget[maxCameras];
+            for (int i = 0; i < maxCameras; i++)
+            {
+                cameraTargets[i] = new CameraRenderTarget();
+            }
+        }
+
+        // 첫 번째 카메라는 자기 자신의 렌더러 사용
+        if (cameraTargets[0].targetRenderer == null)
+        {
+            cameraTargets[0].targetRenderer = GetComponent<Renderer>();
+        }
+
         StartCoroutine(InitializeWithRetry());
     }
 
@@ -31,7 +66,7 @@ public class SimpleExample : MonoBehaviour
         yield return new WaitForSeconds(1f);
 
         // 카메라 찾기 및 시작
-        yield return StartCoroutine(FindCameraAndStart());
+        yield return StartCoroutine(FindCamerasAndStart());
     }
 
     void RequestAndroidPermissions()
@@ -48,11 +83,11 @@ public class SimpleExample : MonoBehaviour
             if (!Permission.HasUserAuthorizedPermission(permission))
             {
                 Permission.RequestUserPermission(permission);
-                Debug.Log($"[UVC] {permission} 권한 요청");
+                Debug.Log($"[MultiCamera] {permission} 권한 요청");
             }
             else
             {
-                Debug.Log($"[UVC] {permission} 권한 이미 있음");
+                Debug.Log($"[MultiCamera] {permission} 권한 이미 있음");
             }
         }
     }
@@ -61,7 +96,7 @@ public class SimpleExample : MonoBehaviour
     {
         try
         {
-            Debug.Log("[UVC] Initializing UVC Plugin...");
+            Debug.Log("[MultiCamera] Initializing UVC Plugin...");
 
             plugin = new AndroidJavaObject("edu.uga.engr.vel.unityuvcplugin.UnityUVCPlugin");
             Debug.Log("plugin: " + plugin);
@@ -73,15 +108,15 @@ public class SimpleExample : MonoBehaviour
             Debug.Log("activity: " + activity);
 
             plugin.Call("Init", activity);
-            Debug.Log("[UVC] Plugin initialized successfully");
+            Debug.Log("[MultiCamera] Plugin initialized successfully");
         }
         catch (Exception e)
         {
-            Debug.LogError("[UVC] Plugin initialization failed: " + e.Message);
+            Debug.LogError("[MultiCamera] Plugin initialization failed: " + e.Message);
         }
     }
 
-    IEnumerator FindCameraAndStart()
+    IEnumerator FindCamerasAndStart()
     {
         string[] cameras = null;
         int retryCount = 0;
@@ -94,18 +129,22 @@ public class SimpleExample : MonoBehaviour
                 cameras = plugin.Call<string[]>("GetUSBDevices");
                 if (cameras != null && cameras.Length > 0)
                 {
-                    Debug.Log("[UVC] 카메라 발견: " + cameras[0]);
-                    currentCameraName = cameras[0];
+                    Debug.Log($"[MultiCamera] 발견된 카메라 수: {cameras.Length}");
+                    for (int i = 0; i < cameras.Length; i++)
+                    {
+                        Debug.Log($"[MultiCamera] 카메라 {i}: {cameras[i]}");
+                        availableCameras.Add(cameras[i]);
+                    }
                     break;
                 }
                 else
                 {
-                    Debug.Log($"[UVC] 카메라가 없습니다. 다시 시도합니다... ({retryCount + 1}/{maxRetries})");
+                    Debug.Log($"[MultiCamera] 카메라가 없습니다. 다시 시도합니다... ({retryCount + 1}/{maxRetries})");
                 }
             }
             catch (Exception e)
             {
-                Debug.LogError("[UVC] GetUSBDevices failed: " + e.Message);
+                Debug.LogError("[MultiCamera] GetUSBDevices failed: " + e.Message);
             }
 
             retryCount++;
@@ -114,31 +153,53 @@ public class SimpleExample : MonoBehaviour
 
         if (cameras == null || cameras.Length == 0)
         {
-            Debug.LogError("[UVC] 카메라를 찾을 수 없습니다. 중단합니다.");
+            Debug.LogError("[MultiCamera] 카메라를 찾을 수 없습니다. 중단합니다.");
             yield break;
         }
 
-        // 권한 요청 및 카메라 실행
-        StartCoroutine(RequestPermissionAndRunCamera(currentCameraName));
+        // 최대 maxCameras개까지 카메라 시작
+        int camerasToStart = Mathf.Min(cameras.Length, maxCameras);
+        for (int i = 0; i < camerasToStart; i++)
+        {
+            cameraTargets[i].cameraName = cameras[i];
+            StartCoroutine(SetupCamera(i));
+            yield return new WaitForSeconds(1f); // 카메라 간 초기화 간격
+        }
     }
 
-    IEnumerator RequestPermissionAndRunCamera(string cameraName)
+    IEnumerator SetupCamera(int cameraIndex)
     {
-        Debug.Log($"[UVC] {cameraName}에 대한 권한 요청 시작");
+        CameraRenderTarget target = cameraTargets[cameraIndex];
+        string cameraName = target.cameraName;
 
-        // 사용자가 수동으로 권한을 허용할 시간을 줌
-        if (!permissionRequested)
+        Debug.Log($"[MultiCamera] 카메라 {cameraIndex} ({cameraName}) 설정 시작");
+
+        // 권한 요청 및 확인
+        yield return StartCoroutine(RequestPermissionAndCheck(cameraName, cameraIndex));
+
+        if (!HasCameraPermission(cameraName))
         {
-            try
-            {
-                plugin.Call("ObtainPermission", cameraName);
-                permissionRequested = true;
-                Debug.Log($"[UVC] {cameraName} 권한 요청 완료");
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[UVC] Permission request failed: {e.Message}");
-            }
+            Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} ({cameraName}) 권한 획득 실패");
+            yield break;
+        }
+
+        // 카메라 시작
+        yield return StartCoroutine(RunCamera(cameraIndex));
+    }
+
+    IEnumerator RequestPermissionAndCheck(string cameraName, int cameraIndex)
+    {
+        Debug.Log($"[MultiCamera] 카메라 {cameraIndex} ({cameraName})에 대한 권한 요청 시작");
+
+        // 권한 요청
+        try
+        {
+            plugin.Call("ObtainPermission", cameraName);
+            Debug.Log($"[MultiCamera] 카메라 {cameraIndex} ({cameraName}) 권한 요청 완료");
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} 권한 요청 실패: {e.Message}");
         }
 
         // 권한 확인 루프
@@ -152,170 +213,113 @@ public class SimpleExample : MonoBehaviour
                 bool hasPermission = plugin.Call<bool>("hasPermission", cameraName);
                 if (hasPermission)
                 {
-                    Debug.Log($"[UVC] {cameraName} 권한 획득 성공!");
-                    break;
+                    Debug.Log($"[MultiCamera] 카메라 {cameraIndex} ({cameraName}) 권한 획득 성공!");
+                    yield break;
                 }
                 else
                 {
-                    Debug.Log($"[UVC] {cameraName} 권한 대기 중... ({permissionRetries + 1}/{maxPermissionRetries})");
+                    Debug.Log($"[MultiCamera] 카메라 {cameraIndex} ({cameraName}) 권한 대기 중... ({permissionRetries + 1}/{maxPermissionRetries})");
 
                     // 매 2번째 시도마다 권한 재요청
                     if (permissionRetries % 2 == 1)
                     {
                         plugin.Call("ObtainPermission", cameraName);
-                        Debug.Log($"[UVC] {cameraName} 권한 재요청");
+                        Debug.Log($"[MultiCamera] 카메라 {cameraIndex} ({cameraName}) 권한 재요청");
                     }
                 }
             }
             catch (Exception e)
             {
-                Debug.LogError($"[UVC] Permission check failed: {e.Message}");
+                Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} 권한 확인 실패: {e.Message}");
             }
 
             permissionRetries++;
-            yield return new WaitForSeconds(5f);
+            yield return new WaitForSeconds(3f);
         }
+    }
 
-        // 최종 권한 확인
-        bool finalPermissionCheck = false;
+    bool HasCameraPermission(string cameraName)
+    {
         try
         {
-            finalPermissionCheck = plugin.Call<bool>("hasPermission", cameraName);
+            return plugin.Call<bool>("hasPermission", cameraName);
         }
         catch (Exception e)
         {
-            Debug.LogError($"[UVC] Final permission check failed: {e.Message}");
-            yield break;
+            Debug.LogError($"[MultiCamera] 권한 확인 실패: {e.Message}");
+            return false;
         }
-
-        if (!finalPermissionCheck)
-        {
-            Debug.LogError($"[UVC] {cameraName} 권한을 얻지 못했습니다. 중단합니다.");
-            ShowPermissionInstructions();
-            yield break;
-        }
-
-        // 카메라 실행
-        StartCoroutine(RunCamera(cameraName));
     }
 
-    void ShowPermissionInstructions()
+    IEnumerator RunCamera(int cameraIndex)
     {
-        Debug.Log("=== 권한 설정 방법 ===");
-        Debug.Log("1. Quest 헤드셋에서 Settings -> Apps -> [앱 이름] 으로 이동");
-        Debug.Log("2. Permissions 섹션에서 Camera 권한 활성화");
-        Debug.Log("3. 앱을 다시 시작하세요");
-        Debug.Log("====================");
-    }
+        CameraRenderTarget target = cameraTargets[cameraIndex];
+        string cameraName = target.cameraName;
 
-    IEnumerator RunCamera(string cameraName)
-    {
-        Debug.Log($"[UVC] {cameraName} 카메라 시작");
+        Debug.Log($"[MultiCamera] 카메라 {cameraIndex} ({cameraName}) 시작");
 
         // 디바이스 정보 확인
         try
         {
             string deviceInfo = plugin.Call<string>("GetUSBDeviceInfo", cameraName);
-            Debug.Log($"[UVC] 디바이스 정보:\n{deviceInfo}");
+            Debug.Log($"[MultiCamera] 카메라 {cameraIndex} 디바이스 정보:\n{deviceInfo}");
         }
         catch (Exception e)
         {
-            Debug.LogError($"[UVC] 디바이스 정보 가져오기 실패: {e.Message}");
+            Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} 디바이스 정보 가져오기 실패: {e.Message}");
         }
 
-        // 권한 재확인
-        bool hasPermission = false;
-        try
-        {
-            hasPermission = plugin.Call<bool>("hasPermission", cameraName);
-            Debug.Log($"[UVC] 권한 상태: {hasPermission}");
-        }
-        catch (Exception e)
-        {
-            Debug.LogError($"[UVC] 권한 확인 실패: {e.Message}");
-            yield break;
-        }
-
-        if (!hasPermission)
-        {
-            Debug.LogError("[UVC] 권한이 없습니다!");
-            yield break;
-        }
-
-        // 먼저 기존 연결이 있다면 닫기
+        // 기존 연결이 있다면 닫기
         try
         {
             plugin.Call("Close", cameraName);
-            Debug.Log("[UVC] 기존 연결 닫기 시도 완료");
+            Debug.Log($"[MultiCamera] 카메라 {cameraIndex} 기존 연결 닫기 시도 완료");
         }
         catch (Exception closeEx)
         {
-            Debug.Log($"[UVC] Close 시도 (무시됨): {closeEx.Message}");
+            Debug.Log($"[MultiCamera] 카메라 {cameraIndex} Close 시도 (무시됨): {closeEx.Message}");
         }
 
         yield return new WaitForSeconds(1f);
 
+        // 카메라 열기
         string[] infos = null;
         bool openSuccess = false;
 
-        // 첫 번째 카메라 열기 시도
         try
         {
-            Debug.Log($"[UVC] '{cameraName}' 카메라 열기 시도");
+            Debug.Log($"[MultiCamera] 카메라 {cameraIndex} ({cameraName}) 열기 시도");
             infos = plugin.Call<string[]>("Open", cameraName);
             openSuccess = (infos != null);
         }
-        catch (System.Exception e)
+        catch (Exception e)
         {
-            Debug.LogError($"[UVC] 첫 번째 Camera open failed: {e.Message}");
+            Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} Open 실패: {e.Message}");
             openSuccess = false;
         }
 
-        // 첫 번째 시도가 실패하면 재시도
         if (!openSuccess || infos == null)
         {
-            Debug.LogError("[UVC] Open 메서드가 null을 반환했습니다.");
-            Debug.LogError("[UVC] 이는 네이티브 openCamera 함수가 실패했음을 의미합니다.");
-
-            yield return new WaitForSeconds(3f);
-
-            try
-            {
-                Debug.Log("[UVC] 카메라 열기 재시도...");
-                infos = plugin.Call<string[]>("Open", cameraName);
-                openSuccess = (infos != null);
-            }
-            catch (System.Exception e)
-            {
-                Debug.LogError($"[UVC] 재시도 Camera open failed: {e.Message}");
-                openSuccess = false;
-            }
-
-            if (!openSuccess || infos == null)
-            {
-                Debug.LogError("[UVC] 재시도도 실패했습니다. 카메라를 사용할 수 없습니다.");
-                yield break;
-            }
+            Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} Open 실패");
+            yield break;
         }
 
-        Debug.Log($"[UVC] Open 성공! 사용 가능한 포맷 수: {infos.Length}");
-        for (int i = 0; i < infos.Length; i++)
+        Debug.Log($"[MultiCamera] 카메라 {cameraIndex} Open 성공! 사용 가능한 포맷 수: {infos.Length}");
+
+        // MJPEG 포맷 찾기
+        int goodIndex = FindBestMJPEGFormat(infos, cameraIndex);
+        if (goodIndex < 0)
         {
-            Debug.Log($"[UVC] Format {i}: {infos[i]}");
+            Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} MJPEG 포맷을 찾을 수 없습니다.");
+            yield break;
         }
 
-        // 카메라의 실제 디스크립터 정보 확인
-        try
-        {
-            string descriptorInfo = plugin.Call<string>("getDescriptor", 0);
-            Debug.Log($"[UVC] 카메라 디스크립터 상세 정보:\n{descriptorInfo}");
-        }
-        catch (Exception e)
-        {
-            Debug.LogError($"[UVC] 디스크립터 정보 가져오기 실패: {e.Message}");
-        }
+        // 카메라 설정 파싱 및 시작
+        yield return StartCoroutine(StartCameraStream(cameraIndex, infos, goodIndex));
+    }
 
-        // MJPEG 포맷 찾기 (타입 6) - 적절한 해상도 우선 선택
+    int FindBestMJPEGFormat(string[] infos, int cameraIndex)
+    {
         int goodIndex = -1;
         int[] preferredResolutions = { 640, 848, 960, 1280, 1024 };
 
@@ -329,121 +333,64 @@ public class SimpleExample : MonoBehaviour
                     string[] parts = infos[i].Split(',');
                     if (parts.Length >= 4)
                     {
-                        int xx = int.Parse(parts[1]);
-                        if (xx == prefWidth)
+                        int width = int.Parse(parts[1]);
+                        if (width == prefWidth)
                         {
                             goodIndex = i;
-                            Debug.Log($"[UVC] 선호 해상도 MJPEG 포맷 발견: {infos[i]}");
-                            break;
+                            Debug.Log($"[MultiCamera] 카메라 {cameraIndex} 선호 해상도 MJPEG 포맷 발견: {infos[i]}");
+                            return goodIndex;
                         }
                     }
                 }
             }
-            if (goodIndex >= 0) break;
         }
 
         // 선호 해상도가 없다면 첫 번째 MJPEG 사용
-        if (goodIndex < 0)
+        for (int i = 0; i < infos.Length; i++)
         {
-            for (int i = 0; i < infos.Length; i++)
+            if (!string.IsNullOrEmpty(infos[i]) && infos[i].StartsWith("6"))
             {
-                if (!string.IsNullOrEmpty(infos[i]) && infos[i].StartsWith("6"))
-                {
-                    goodIndex = i;
-                    Debug.Log($"[UVC] 기본 MJPEG 포맷 발견: {infos[i]}");
-                    break;
-                }
+                goodIndex = i;
+                Debug.Log($"[MultiCamera] 카메라 {cameraIndex} 기본 MJPEG 포맷 발견: {infos[i]}");
+                break;
             }
         }
 
-        if (goodIndex < 0)
-        {
-            Debug.LogError("[UVC] MJPEG 포맷(타입 6)을 찾을 수 없습니다.");
-            Debug.LogError("[UVC] 사용 가능한 포맷:");
-            for (int i = 0; i < infos.Length; i++)
-            {
-                Debug.LogError($"[UVC]   {i}: {infos[i]}");
-            }
-            yield break;
-        }
+        return goodIndex;
+    }
 
-        // 카메라 설정 파싱
-        string[] info = null;
-        try
-        {
-            info = infos[goodIndex].Split(',');
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogError($"[UVC] Format parsing failed: {e.Message}");
-            Debug.LogError($"[UVC] Format string: '{infos[goodIndex]}'");
-            yield break;
-        }
+    IEnumerator StartCameraStream(int cameraIndex, string[] infos, int formatIndex)
+    {
+        CameraRenderTarget target = cameraTargets[cameraIndex];
+        string cameraName = target.cameraName;
 
-        if (info == null || info.Length < 4)
-        {
-            Debug.LogError($"[UVC] 카메라 정보 형식이 올바르지 않습니다. 길이: {info?.Length ?? 0}");
-            Debug.LogError($"[UVC] 원본 문자열: '{infos[goodIndex]}'");
-            yield break;
-        }
-
-        int width, height, fps;
-        try
-        {
-            width = int.Parse(info[1]);
-            height = int.Parse(info[2]);
-            fps = int.Parse(info[3]);
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogError($"[UVC] 카메라 설정 파싱 실패: {e.Message}");
-            Debug.LogError($"[UVC] info[1]='{info[1]}', info[2]='{info[2]}', info[3]='{info[3]}'");
-            yield break;
-        }
-
-        var bandwidth = 1.0f;
-
-        Debug.Log($"[UVC] 카메라 설정: {width}x{height} @ {fps}fps");
-
-        int res = -1;
-        bool startSuccess = false;
-
-        // 로그에서 확인된 실제 포맷 인덱스를 사용 (mode가 포맷 인덱스)
-        // Format 8: 6,640,480,30 - 640x480 MJPEG
-        // Format 5: 6,848,480,30 - 848x480 MJPEG  
-        // Format 7: 6,1280,720,30 - 1280x720 MJPEG
-        // Format 9: 6,1920,1080,30 - 1920x1080 MJPEG
-        // Format 4: 6,640,360,30 - 640x360 MJPEG
-        // Format 3: 6,424,240,30 - 424x240 MJPEG
-        // Format 2: 6,320,240,30 - 320x240 MJPEG (이전 성공)
-
+        // 해상도 설정들 (카메라별로 다른 해상도 사용 가능)
         int[][] resolutionSettings = {
-            new int[] {1920, 1080, 30, 9, 5},   // Format 9: 1920x1080, bw=0.05
-            new int[] {1280, 720, 30, 7, 8},    // Format 7: 1280x720, bw=0.08
-            new int[] {848, 480, 30, 5, 12},    // Format 5: 848x480, bw=0.12
             new int[] {640, 480, 30, 8, 15},    // Format 8: 640x480, bw=0.15
-            new int[] {640, 360, 30, 4, 18},    // Format 4: 640x360, bw=0.18
+            new int[] {848, 480, 30, 5, 12},    // Format 5: 848x480, bw=0.12
+            new int[] {320, 240, 30, 2, 10},    // Format 2: 320x240, bw=0.1
             new int[] {424, 240, 30, 3, 20},    // Format 3: 424x240, bw=0.2
-            new int[] {320, 240, 30, 2, 10},    // Format 2: 320x240, bw=0.1 (이전 성공)
         };
+
+        bool startSuccess = false;
+        int width = 640, height = 480, fps = 30;
 
         for (int i = 0; i < resolutionSettings.Length; i++)
         {
             int testWidth = resolutionSettings[i][0];
             int testHeight = resolutionSettings[i][1];
             int testFps = resolutionSettings[i][2];
-            int testMode = resolutionSettings[i][3]; // 이제 실제 포맷 인덱스
+            int testMode = resolutionSettings[i][3];
             float testBandwidth = resolutionSettings[i][4] / 100.0f;
 
             try
             {
-                Debug.Log($"[UVC] 해상도 시도 {i + 1}: {testWidth}x{testHeight}@{testFps}fps, Format {testMode}, bw={testBandwidth}");
-                res = plugin.Call<int>("Start", cameraName, testWidth, testHeight, testFps, testMode, testBandwidth, true, false);
-                Debug.Log($"[UVC] 결과: {res}");
+                Debug.Log($"[MultiCamera] 카메라 {cameraIndex} 해상도 시도: {testWidth}x{testHeight}@{testFps}fps, Format {testMode}");
+                int res = plugin.Call<int>("Start", cameraName, testWidth, testHeight, testFps, testMode, testBandwidth, true, false);
 
                 if (res == 0)
                 {
-                    Debug.Log($"[UVC] 성공! 해상도: {testWidth}x{testHeight}, Format {testMode}");
+                    Debug.Log($"[MultiCamera] 카메라 {cameraIndex} 성공! 해상도: {testWidth}x{testHeight}");
                     width = testWidth;
                     height = testHeight;
                     fps = testFps;
@@ -452,12 +399,12 @@ public class SimpleExample : MonoBehaviour
                 }
                 else
                 {
-                    Debug.LogWarning($"[UVC] 실패: {testWidth}x{testHeight} Format {testMode} (에러: {res})");
+                    Debug.LogWarning($"[MultiCamera] 카메라 {cameraIndex} 실패: {testWidth}x{testHeight} (에러: {res})");
                 }
             }
             catch (Exception e)
             {
-                Debug.LogError($"[UVC] 해상도 {testWidth}x{testHeight} Format {testMode} 시도 에러: {e.Message}");
+                Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} 시도 에러: {e.Message}");
             }
 
             yield return new WaitForSeconds(0.3f);
@@ -465,150 +412,188 @@ public class SimpleExample : MonoBehaviour
 
         if (!startSuccess)
         {
-            Debug.LogError($"[UVC] 모든 시도 실패. 마지막 오류 코드: {res}");
-            Debug.LogError("[UVC] 카메라 포맷이 지원되지 않거나 하드웨어 문제일 수 있습니다.");
-            Debug.LogError("[UVC] 시도를 중단합니다.");
+            Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} 모든 시도 실패");
             yield break;
         }
 
-        Debug.Log("[UVC] 카메라 스트리밍 시작 성공!");
-
-        // 텍스처 생성 및 설정
-        Texture2D cameraTexture = null;
+        // 텍스처 생성
         try
         {
-            // MJPEG는 RGB24로 디코딩됨
-            cameraTexture = new Texture2D(width, height, TextureFormat.RGB24, false);
-            Debug.Log($"[UVC] 텍스처 생성: {width}x{height}, RGB24");
+            target.cameraTexture = new Texture2D(width, height, TextureFormat.RGB24, false);
+            target.width = width;
+            target.height = height;
+            target.fps = fps;
+            target.isActive = true;
 
-            Renderer renderer = GetComponent<Renderer>();
-            if (renderer == null)
+            if (target.targetRenderer != null && target.targetRenderer.material != null)
             {
-                Debug.LogError("[UVC] Renderer component not found!");
+                target.targetRenderer.material.mainTexture = target.cameraTexture;
+                Debug.Log($"[MultiCamera] 카메라 {cameraIndex} 텍스처 설정 완료: {width}x{height}");
+            }
+            else
+            {
+                Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} Renderer 또는 Material이 없습니다!");
                 yield break;
             }
-
-            if (renderer.material == null)
-            {
-                Debug.LogError("[UVC] Renderer material is null!");
-                yield break;
-            }
-
-            renderer.material.mainTexture = cameraTexture;
-            Debug.Log("[UVC] 텍스처 설정 완료");
         }
-        catch (System.Exception e)
+        catch (Exception e)
         {
-            Debug.LogError($"[UVC] Texture creation failed: {e.Message}");
+            Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} 텍스처 생성 실패: {e.Message}");
             yield break;
         }
 
-        // 프레임 데이터 읽기 루프
+        // 프레임 렌더링 코루틴 시작
+        target.renderCoroutine = StartCoroutine(RenderCameraFrames(cameraIndex));
+    }
+
+    IEnumerator RenderCameraFrames(int cameraIndex)
+    {
+        CameraRenderTarget target = cameraTargets[cameraIndex];
+        string cameraName = target.cameraName;
+
         int frameCount = 0;
         int errorCount = 0;
         const int maxErrors = 10;
 
-        while (errorCount < maxErrors)
+        Debug.Log($"[MultiCamera] 카메라 {cameraIndex} 프레임 렌더링 시작");
+
+        while (target.isActive && errorCount < maxErrors)
         {
             sbyte[] frameData = null;
             bool frameSuccess = false;
 
-            // try-catch 블록 분리 (yield 없음)
             try
             {
                 frameData = plugin.Call<sbyte[]>("GetFrameData", cameraName);
                 frameSuccess = true;
             }
-            catch (System.Exception e)
+            catch (Exception e)
             {
                 errorCount++;
-                Debug.LogError($"[UVC] Frame data error ({errorCount}/{maxErrors}): {e.Message}");
+                Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} 프레임 데이터 에러 ({errorCount}/{maxErrors}): {e.Message}");
                 frameSuccess = false;
             }
 
-            // 성공한 경우 처리
             if (frameSuccess && frameData != null && frameData.Length > 0)
             {
                 try
                 {
-                    cameraTexture.LoadRawTextureData((byte[])(System.Array)frameData);
-                    cameraTexture.Apply(false, false);
+                    target.cameraTexture.LoadRawTextureData((byte[])(System.Array)frameData);
+                    target.cameraTexture.Apply(false, false);
 
                     frameCount++;
-                    if (frameCount % 30 == 0) // 30프레임마다 로그
+                    if (frameCount % 60 == 0) // 60프레임마다 로그
                     {
-                        Debug.Log($"[UVC] 프레임 {frameCount} 처리됨");
+                        Debug.Log($"[MultiCamera] 카메라 {cameraIndex} 프레임 {frameCount} 처리됨");
                     }
 
                     errorCount = 0; // 성공하면 에러 카운트 리셋
                 }
-                catch (System.Exception e)
+                catch (Exception e)
                 {
                     errorCount++;
-                    Debug.LogError($"[UVC] Texture update error ({errorCount}/{maxErrors}): {e.Message}");
+                    Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} 텍스처 업데이트 에러 ({errorCount}/{maxErrors}): {e.Message}");
                 }
             }
-            else if (frameSuccess) // frameData가 null이거나 빈 경우
+            else if (frameSuccess)
             {
                 errorCount++;
-                Debug.LogWarning($"[UVC] 빈 프레임 데이터 ({errorCount}/{maxErrors})");
+                Debug.LogWarning($"[MultiCamera] 카메라 {cameraIndex} 빈 프레임 데이터 ({errorCount}/{maxErrors})");
             }
 
-            // 에러가 발생한 경우에만 대기 (yield를 try-catch 밖으로)
             if (!frameSuccess || (frameData == null || frameData.Length == 0))
             {
                 if (errorCount >= maxErrors)
                 {
-                    Debug.LogError("[UVC] 너무 많은 프레임 에러. 카메라 중지.");
+                    Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} 너무 많은 프레임 에러. 중지.");
                     break;
                 }
-                yield return new WaitForSeconds(0.1f); // 에러 발생시 대기
+                yield return new WaitForSeconds(0.1f);
             }
             else
             {
-                yield return null; // 정상 처리시 다음 프레임으로
+                yield return null;
             }
         }
 
-        Debug.LogError("[UVC] 카메라 스트리밍 중단됨");
+        Debug.LogError($"[MultiCamera] 카메라 {cameraIndex} 스트리밍 중단됨");
+        target.isActive = false;
     }
 
     void OnDestroy()
     {
-        try
+        StopAllCameras();
+    }
+
+    void StopAllCameras()
+    {
+        for (int i = 0; i < cameraTargets.Length; i++)
         {
-            if (plugin != null && !string.IsNullOrEmpty(currentCameraName))
+            CameraRenderTarget target = cameraTargets[i];
+            if (target != null && target.isActive)
             {
-                plugin.Call("Stop", currentCameraName);
-                plugin.Call("Close", currentCameraName);
-                Debug.Log("[UVC] Camera stopped and closed");
+                target.isActive = false;
+
+                if (target.renderCoroutine != null)
+                {
+                    StopCoroutine(target.renderCoroutine);
+                }
+
+                try
+                {
+                    if (plugin != null && !string.IsNullOrEmpty(target.cameraName))
+                    {
+                        plugin.Call("Stop", target.cameraName);
+                        plugin.Call("Close", target.cameraName);
+                        Debug.Log($"[MultiCamera] 카메라 {i} ({target.cameraName}) 중지 및 닫기 완료");
+                    }
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError($"[MultiCamera] 카메라 {i} 정리 실패: {e.Message}");
+                }
             }
         }
-        catch (Exception e)
+    }
+
+    // 디버그용 메서드들
+    [ContextMenu("Manual Permission Request All")]
+    void ManualPermissionRequestAll()
+    {
+        for (int i = 0; i < cameraTargets.Length; i++)
         {
-            Debug.LogError($"[UVC] Cleanup failed: {e.Message}");
+            CameraRenderTarget target = cameraTargets[i];
+            if (plugin != null && !string.IsNullOrEmpty(target.cameraName))
+            {
+                plugin.Call("ObtainPermission", target.cameraName);
+                Debug.Log($"[MultiCamera] 카메라 {i} 수동 권한 요청 전송");
+            }
         }
     }
 
-    // 디버그용 - Inspector에서 수동으로 권한 요청
-    [ContextMenu("Manual Permission Request")]
-    void ManualPermissionRequest()
+    [ContextMenu("Restart All Cameras")]
+    void RestartAllCameras()
     {
-        if (plugin != null && !string.IsNullOrEmpty(currentCameraName))
-        {
-            plugin.Call("ObtainPermission", currentCameraName);
-            Debug.Log("[UVC] Manual permission request sent");
-        }
+        StopAllCameras();
+        StopAllCoroutines();
+        StartCoroutine(InitializeWithRetry());
     }
 
-    // 디버그용 - Inspector에서 수동으로 카메라 재시작
-    [ContextMenu("Restart Camera")]
-    void RestartCamera()
+    [ContextMenu("Stop All Cameras")]
+    void StopAllCamerasManual()
     {
-        if (!string.IsNullOrEmpty(currentCameraName))
+        StopAllCameras();
+    }
+
+    // 런타임에서 카메라 상태 확인
+    public void GetCameraStatus()
+    {
+        Debug.Log("=== 카메라 상태 ===");
+        for (int i = 0; i < cameraTargets.Length; i++)
         {
-            StopAllCoroutines();
-            StartCoroutine(RunCamera(currentCameraName));
+            CameraRenderTarget target = cameraTargets[i];
+            Debug.Log($"카메라 {i}: {target.cameraName}, 활성: {target.isActive}, 해상도: {target.width}x{target.height}");
         }
+        Debug.Log("==================");
     }
 }
